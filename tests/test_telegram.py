@@ -14,6 +14,12 @@ STATUS = {
     "change_pct": -0.89,
     "timestamp": "2026-08-14T09:00:00+03:00",
     "data_provider": "borsapy/TradingView",
+    "market_context": {
+        "regime": {"state": "Dengeli / sıkışan piyasa"},
+        "structure": {"state": "LH / LL", "event": "Swing Low altı BOS"},
+        "profile": {"position": "Value Area içinde", "poc": 326.62, "vah": 336.25, "val": 301.25},
+        "relative_volume": 0.68,
+    },
     "momentum": [
         ["MACD", "değer", "Pozitif", "renk"],
         ["RSI", "değer", "50 üzeri", "renk"],

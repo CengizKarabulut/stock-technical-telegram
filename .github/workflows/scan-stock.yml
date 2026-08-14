@@ -20,6 +20,11 @@ on:
         default: "AUTO"
         type: choice
         options: [AUTO, BORSAPY, YFINANCE]
+      anchor_date:
+        description: "Manuel AVWAP başlangıcı (YYYY-MM-DD, boşsa yıl başı)"
+        required: false
+        default: ""
+        type: string
       period:
         description: "Veri dönemi"
         required: true
@@ -70,6 +75,7 @@ jobs:
           INPUT_TICKER: ${{ inputs.ticker }}
           INPUT_MARKET: ${{ inputs.market }}
           INPUT_PROVIDER: ${{ inputs.provider }}
+          INPUT_ANCHOR_DATE: ${{ inputs.anchor_date }}
           INPUT_PERIOD: ${{ inputs.period }}
           INPUT_INTERVAL: ${{ inputs.interval }}
         run: |
@@ -77,6 +83,7 @@ jobs:
             --ticker "$INPUT_TICKER" \
             --market "$INPUT_MARKET" \
             --provider "$INPUT_PROVIDER" \
+            --anchor-date "$INPUT_ANCHOR_DATE" \
             --period "$INPUT_PERIOD" \
             --interval "$INPUT_INTERVAL"
 

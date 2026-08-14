@@ -13,18 +13,20 @@ DEFAULT_THREAD_ID = ""
 
 
 def caption(status: dict) -> str:
-    macd = status["momentum"][0][2]
-    rsi = status["momentum"][1][2]
-    dmi = status["trend_volatility_volume"][0][2]
+    context = status["market_context"]
+    profile = context["profile"]
+    structure = context["structure"]
     return (
-        f"📊 {status['symbol']} Teknik Durum\n"
+        f"📊 {status['symbol']} Teknik Piyasa Durumu\n"
         f"Fiyat: {status['price']:,.2f} ({status['change_pct']:+.2f}%)\n"
-        f"MACD: {macd}\n"
-        f"RSI: {rsi}\n"
-        f"DMI: {dmi}\n"
-        f"Bar: {status['timestamp']}\n"
-        f"Kaynak: {status.get('data_provider', 'bilinmiyor')}\n\n"
-        "Bilgilendirme amaçlıdır; yatırım tavsiyesi değildir."
+        f"Rejim: {context['regime']['state']}\n"
+        f"Yapı: {structure['state']} — {structure['event']}\n"
+        f"Konum: {profile['position']}\n"
+        f"POC: {profile['poc']:,.2f} | VAH: {profile['vah']:,.2f} | VAL: {profile['val']:,.2f}\n"
+        f"RVOL: {context['relative_volume']:.2f}x\n"
+        f"Kaynak: {status.get('data_provider', 'bilinmiyor')}\n"
+        f"Bar: {status['timestamp']}\n\n"
+        "Durum raporudur; otomatik AL/SAT puanı değildir. Yatırım tavsiyesi değildir."
     )
 
 

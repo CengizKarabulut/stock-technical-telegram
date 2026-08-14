@@ -19,6 +19,8 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+from src.market_context import build_market_context, diagnostics, normalized_gap_state
+
 
 MA_PERIODS = [5, 8, 10, 13, 20, 21, 34, 50, 55, 89, 100, 144, 200, 233, 377]
 BG = "#0f172a"
@@ -44,6 +46,7 @@ class ScanConfig:
     interval: str = "1d"
     equality_tolerance_pct: float = 0.02
     provider: str = "AUTO"
+    anchor_date: str = ""
 
 
 def normalize_symbol(ticker: str, market: str) -> str:
@@ -243,6 +246,9 @@ def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
     for length in MA_PERIODS:
         out[f"SMA_{length}"] = close.rolling(length).mean()
         out[f"EMA_{length}"] = ema(close, length)
+    ema_columns = [f"EMA_{length}" for length in MA_PERIODS]
+    out["MA_SPREAD_PCT"] = 100 * (out[ema_columns].max(axis=1) - out[ema_columns].min(axis=1)) / close
+    out["MA_SPREAD_RANK"] = percentile_rank(out["MA_SPREAD_PCT"], 252)
 
     out["RSI"] = rsi(close, 14)
     out["RSI_MA"] = out["RSI"].rolling(14).mean()
@@ -250,6 +256,7 @@ def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
     out["MACD"] = ema(close, 12) - ema(close, 26)
     out["MACD_SIGNAL"] = ema(out["MACD"], 9)
     out["MACD_HIST"] = out["MACD"] - out["MACD_SIGNAL"]
+    out["MACD_HIST_RANK"] = percentile_rank(out["MACD_HIST"].abs(), 252)
 
     stoch_rsi = rsi(close, 14)
     stoch_low = stoch_rsi.rolling(14).min()
@@ -278,6 +285,7 @@ def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
     out["ATR_PCT"] = 100 * out["ATR"] / close
     out["ATR_RANK"] = percentile_rank(out["ATR_PCT"], 252)
     out["PLUS_DI"], out["MINUS_DI"], out["ADX"] = adx_dmi(out, 14)
+    out["ADX_RANK"] = percentile_rank(out["ADX"], 252)
     out["SUPERTREND"], out["SUPERTREND_DIR"] = supertrend(out, 10, 3.0)
 
     typical = (out["High"] + out["Low"] + close) / 3
@@ -289,6 +297,7 @@ def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
     out["MFI_MA"] = out["MFI"].rolling(14).mean()
 
     out["OBV"] = (np.sign(close.diff()).fillna(0) * out["Volume"]).cumsum()
+    out["OBV_EMA"] = ema(out["OBV"], 20)
     mean_typical = typical.rolling(20).mean()
     mean_deviation = typical.rolling(20).apply(lambda values: np.mean(np.abs(values - values.mean())), raw=True)
     out["CCI"] = (typical - mean_typical) / (0.015 * mean_deviation.replace(0, np.nan))
@@ -298,6 +307,7 @@ def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
     out["VWAP"] = (typical * out["Volume"]).cumsum() / cumulative_volume
     out["VOLUME_MA"] = out["Volume"].rolling(20).mean()
     out["VOLUME_RATIO"] = out["Volume"] / out["VOLUME_MA"].replace(0, np.nan)
+    out["VOLUME_RANK"] = percentile_rank(out["Volume"], 252)
 
     out["TENKAN"] = (out["High"].rolling(9).max() + out["Low"].rolling(9).min()) / 2
     out["KIJUN"] = (out["High"].rolling(26).max() + out["Low"].rolling(26).min()) / 2
@@ -361,6 +371,22 @@ def fmt(value: Any, digits: int = 2) -> str:
     return "—" if not math.isfinite(numeric) else f"{numeric:,.{digits}f}"
 
 
+def tone_color(tone: str) -> str:
+    return {
+        "positive": GREEN,
+        "negative": RED,
+        "warning": YELLOW,
+        "purple": PURPLE,
+        "blue": BLUE,
+        "neutral": GRAY,
+    }.get(tone, GRAY)
+
+
+def diagnostic_text(series: pd.Series) -> str:
+    values = diagnostics(series)
+    return f"Δ1 {fmt(values['delta_1'])} | Δ3 {fmt(values['delta_3'])} | Eğim5 {fmt(values['slope_5'])}"
+
+
 def build_status(data: pd.DataFrame, config: ScanConfig, symbol: str) -> dict[str, Any]:
     row = data.iloc[-1]
     previous = data.iloc[-2]
@@ -388,9 +414,12 @@ def build_status(data: pd.DataFrame, config: ScanConfig, symbol: str) -> dict[st
     if hist < 0:
         hist_status = "Düşüş momentumu azalıyor" if hist > prev_hist else "Düşüş momentumu artıyor"
         hist_color = YELLOW if hist > prev_hist else RED
-    else:
+    elif hist > 0:
         hist_status = "Yükseliş momentumu artıyor" if hist > prev_hist else "Yükseliş momentumu azalıyor"
         hist_color = GREEN if hist > prev_hist else LIGHT_GREEN
+    else:
+        hist_status = "Histogram sıfırda"
+        hist_color = GRAY
 
     rsi_value = float(row["RSI"])
     rsi_zone = "Aşırı alım" if rsi_value >= 70 else "Aşırı satım" if rsi_value <= 30 else "50 üzeri" if rsi_value >= 50 else "50 altı"
@@ -401,31 +430,45 @@ def build_status(data: pd.DataFrame, config: ScanConfig, symbol: str) -> dict[st
     mfi_value = float(row["MFI"])
     cci_value = float(row["CCI"])
 
+    macd_relation = "MACD > Signal" if row["MACD"] > row["MACD_SIGNAL"] else "MACD < Signal"
+    macd_zero = "MACD > 0" if row["MACD"] > 0 else "MACD < 0"
     momentum = [
-        ["MACD", f"M {fmt(row['MACD'])} | S {fmt(row['MACD_SIGNAL'])} | H {fmt(hist)}", hist_status, hist_color],
-        ["RSI", f"RSI {fmt(rsi_value)} | MA14 {fmt(row['RSI_MA'])}", cross_text(data["RSI"], data["RSI_MA"], rsi_zone), GREEN if rsi_value > row["RSI_MA"] else RED],
-        ["Stoch RSI", f"K {fmt(row['STOCH_K'])} | D {fmt(row['STOCH_D'])}", cross_text(data["STOCH_K"], data["STOCH_D"], stoch_zone), GREEN if row["STOCH_K"] > row["STOCH_D"] else RED],
-        ["SMI", f"SMI {fmt(smi_value)} | EMA3 {fmt(row['SMI_EMA'])}", cross_text(data["SMI"], data["SMI_EMA"], smi_zone), GREEN if smi_value > row["SMI_EMA"] else RED],
-        ["MFI", f"MFI {fmt(mfi_value)} | MA14 {fmt(row['MFI_MA'])}", cross_text(data["MFI"], data["MFI_MA"], "20/50/80"), GREEN if mfi_value > row["MFI_MA"] else RED],
-        ["CCI", f"CCI {fmt(cci_value)} | MA20 {fmt(row['CCI_MA'])}", cross_text(data["CCI"], data["CCI_MA"], "-100/0/+100"), GREEN if cci_value > row["CCI_MA"] else RED],
+        ["MACD", f"M {fmt(row['MACD'])} | S {fmt(row['MACD_SIGNAL'])} | H {fmt(hist)}\n{diagnostic_text(data['MACD'])}", f"{hist_status}\n{macd_relation} | {macd_zero} | Hist perc %{fmt(row['MACD_HIST_RANK'], 0)} | {normalized_gap_state(data['MACD'], data['MACD_SIGNAL'])}", hist_color],
+        ["RSI", f"RSI {fmt(rsi_value)} | MA14 {fmt(row['RSI_MA'])}\n{diagnostic_text(data['RSI'])}", f"{cross_text(data['RSI'], data['RSI_MA'], rsi_zone)}\n{normalized_gap_state(data['RSI'], data['RSI_MA'])}", GREEN if rsi_value > row["RSI_MA"] else RED],
+        ["Stoch RSI", f"K {fmt(row['STOCH_K'])} | D {fmt(row['STOCH_D'])}\n{diagnostic_text(data['STOCH_K'])}", f"{cross_text(data['STOCH_K'], data['STOCH_D'], stoch_zone)}\n{normalized_gap_state(data['STOCH_K'], data['STOCH_D'])}", GREEN if row["STOCH_K"] > row["STOCH_D"] else RED],
+        ["SMI", f"SMI {fmt(smi_value)} | EMA3 {fmt(row['SMI_EMA'])}\n{diagnostic_text(data['SMI'])}", f"{cross_text(data['SMI'], data['SMI_EMA'], smi_zone)}\n{normalized_gap_state(data['SMI'], data['SMI_EMA'])}", GREEN if smi_value > row["SMI_EMA"] else RED],
+        ["MFI", f"MFI {fmt(mfi_value)} | MA14 {fmt(row['MFI_MA'])}\n{diagnostic_text(data['MFI'])}", f"{cross_text(data['MFI'], data['MFI_MA'], '20/50/80')}\n{normalized_gap_state(data['MFI'], data['MFI_MA'])}", GREEN if mfi_value > row["MFI_MA"] else RED],
+        ["CCI", f"CCI {fmt(cci_value)} | MA20 {fmt(row['CCI_MA'])}\n{diagnostic_text(data['CCI'])}", f"{cross_text(data['CCI'], data['CCI_MA'], '-100/0/+100')}\n{normalized_gap_state(data['CCI'], data['CCI_MA'])}", GREEN if cci_value > row["CCI_MA"] else RED],
     ]
 
     bb_rank = float(row["BB_WIDTH_RANK"])
     bb_state = "Aşırı dar" if bb_rank <= 10 else "Dar" if bb_rank <= 20 else "Çok geniş" if bb_rank >= 90 else "Geniş" if bb_rank >= 80 else "Normal"
+    bb_direction = "Genişliyor" if row["BB_WIDTH"] > previous["BB_WIDTH"] else "Daralıyor"
+    bb_position = "Üst bant üzerinde" if price > row["BB_UPPER"] else "Alt bant altında" if price < row["BB_LOWER"] else "Orta bant üzerinde" if price > row["BB_MID"] else "Orta bant altında"
     cloud_top = max(float(row["VISIBLE_SPAN_A"]), float(row["VISIBLE_SPAN_B"]))
     cloud_bottom = min(float(row["VISIBLE_SPAN_A"]), float(row["VISIBLE_SPAN_B"]))
     cloud_state = "Bulut üstü" if price > cloud_top else "Bulut altı" if price < cloud_bottom else "Bulut içi"
     trend = [
-        ["ADX/DMI", f"ADX {fmt(row['ADX'])} | +DI {fmt(row['PLUS_DI'])} | -DI {fmt(row['MINUS_DI'])}", "+DI üstün" if row["PLUS_DI"] > row["MINUS_DI"] else "-DI üstün", GREEN if row["PLUS_DI"] > row["MINUS_DI"] else RED],
+        ["ADX/DMI", f"ADX {fmt(row['ADX'])} | +DI {fmt(row['PLUS_DI'])} | -DI {fmt(row['MINUS_DI'])}", f"{'+DI üstün' if row['PLUS_DI'] > row['MINUS_DI'] else '-DI üstün'} | ADX perc %{fmt(row['ADX_RANK'], 0)} | {diagnostic_text(data['ADX'])}", GREEN if row["PLUS_DI"] > row["MINUS_DI"] else RED],
         ["Supertrend", fmt(row["SUPERTREND"]), "Fiyat üstünde" if price > row["SUPERTREND"] else "Fiyat altında", GREEN if price > row["SUPERTREND"] else RED],
-        ["VWAP", fmt(row["VWAP"]), "Fiyat üstünde" if price > row["VWAP"] else "Fiyat altında", GREEN if price > row["VWAP"] else RED],
+        ["Kümülatif VWAP", fmt(row["VWAP"]), f"Fiyat {'üstünde' if price > row['VWAP'] else 'altında'} | Mesafe {(price / row['VWAP'] - 1) * 100:+.2f}%", GREEN if price > row["VWAP"] else RED],
         ["Ichimoku", f"Tenkan {fmt(row['TENKAN'])} | Kijun {fmt(row['KIJUN'])}", cloud_state, GREEN if cloud_state == "Bulut üstü" else RED if cloud_state == "Bulut altı" else YELLOW],
         ["Parabolic SAR", fmt(row["PSAR"]), "SAR fiyat altında" if row["PSAR"] < price else "SAR fiyat üzerinde", GREEN if row["PSAR"] < price else RED],
-        ["Bollinger", f"Alt {fmt(row['BB_LOWER'])} | Orta {fmt(row['BB_MID'])} | Üst {fmt(row['BB_UPPER'])}", f"{bb_state} | Rank %{fmt(bb_rank, 0)}", BLUE if bb_rank <= 20 else PURPLE if bb_rank >= 80 else GRAY],
-        ["ATR", f"ATR {fmt(row['ATR'])} | ATR% {fmt(row['ATR_PCT'])}", f"Percentile %{fmt(row['ATR_RANK'], 0)}", PURPLE],
-        ["Hacim", f"{fmt(row['Volume'], 0)} | Ort. {fmt(row['VOLUME_MA'], 0)}", f"{fmt(row['VOLUME_RATIO'])}x", PURPLE if row["VOLUME_RATIO"] >= 1.2 else GRAY],
-        ["OBV", fmt(row["OBV"], 0), "Yükseliyor" if row["OBV"] > previous["OBV"] else "Düşüyor", GREEN if row["OBV"] > previous["OBV"] else RED],
+        ["Bollinger", f"Alt {fmt(row['BB_LOWER'])} | Orta {fmt(row['BB_MID'])} | Üst {fmt(row['BB_UPPER'])}", f"{bb_position} | {bb_state} / {bb_direction} | Perc %{fmt(bb_rank, 0)}", BLUE if bb_rank <= 20 else PURPLE if bb_rank >= 80 else GRAY],
+        ["ATR", f"ATR {fmt(row['ATR'])} | ATR% {fmt(row['ATR_PCT'])}", f"Percentile %{fmt(row['ATR_RANK'], 0)} | {diagnostic_text(data['ATR_PCT'])}", PURPLE],
+        ["Hacim", f"{fmt(row['Volume'], 0)} | Ort. {fmt(row['VOLUME_MA'], 0)}", f"{fmt(row['VOLUME_RATIO'])}x | Perc %{fmt(row['VOLUME_RANK'], 0)}", PURPLE if row["VOLUME_RATIO"] >= 1.2 else GRAY],
+        ["OBV", f"{fmt(row['OBV'], 0)} | EMA20 {fmt(row['OBV_EMA'], 0)}", f"{normalized_gap_state(data['OBV'], data['OBV_EMA'])} | {diagnostic_text(data['OBV'])}", GREEN if row["OBV"] > row["OBV_EMA"] else RED],
     ]
+
+    context = build_market_context(data, MA_PERIODS, config.anchor_date)
+    executive = [[item[0], item[1], item[2], tone_color(item[3])] for item in context["families"]]
+    location = [[item[0], item[1], item[2], tone_color(item[3])] for item in context["location_rows"]]
+    participation = [[item[0], item[1], item[2], tone_color(item[3])] for item in context["participation_rows"]]
+    events = []
+    for item in context["events"]:
+        age_text = "Bu bar" if item["age"] == 0 else f"{item['age']} bar önce"
+        event_color = GREEN if "↑" in item["event"] or "High üzeri" in item["event"] else RED if "↓" in item["event"] or "Low altı" in item["event"] else GRAY
+        events.append([item["event"], age_text, item["state"], event_color])
 
     return {
         "data_provider": data.attrs.get("provider", config.provider),
@@ -437,23 +480,30 @@ def build_status(data: pd.DataFrame, config: ScanConfig, symbol: str) -> dict[st
         "change_pct": (price / float(previous["Close"]) - 1) * 100,
         "period": config.period,
         "interval": config.interval,
+        "anchor_date": config.anchor_date,
         "equality_tolerance_pct": config.equality_tolerance_pct,
         "ma": ma_rows,
         "momentum": momentum,
         "trend_volatility_volume": trend,
+        "executive": executive,
+        "location": location,
+        "participation": participation,
+        "events": events,
+        "market_context": context,
     }
 
 
-def draw_table(ax: plt.Axes, title: str, columns: list[str], rows: list[list[str]], colors: list[list[str]] | None = None, font_size: int = 10) -> None:
+def draw_table(ax: plt.Axes, title: str, columns: list[str], rows: list[list[str]], colors: list[list[str]] | None = None, font_size: int = 10, col_widths: list[float] | None = None) -> None:
     ax.set_facecolor(PANEL)
     ax.axis("off")
     ax.set_title(title, color=WHITE, fontsize=15, fontweight="bold", loc="left", pad=10)
-    table = ax.table(cellText=rows, colLabels=columns, loc="center", cellLoc="left", colLoc="center", bbox=[0, 0, 1, 0.94])
+    table = ax.table(cellText=rows, colLabels=columns, colWidths=col_widths, loc="center", cellLoc="left", colLoc="center", bbox=[0, 0, 1, 0.94])
     table.auto_set_font_size(False)
     table.set_fontsize(font_size)
     for (row_index, column_index), cell in table.get_celld().items():
         cell.set_edgecolor("#334155")
         cell.get_text().set_color(WHITE)
+        cell.get_text().set_wrap(True)
         if row_index == 0:
             cell.set_facecolor(HEADER)
             cell.get_text().set_fontweight("bold")
@@ -463,27 +513,33 @@ def draw_table(ax: plt.Axes, title: str, columns: list[str], rows: list[list[str
                 chosen = colors[row_index - 1][column_index]
                 if chosen:
                     cell.set_facecolor(chosen)
-    table.auto_set_column_width(col=list(range(len(columns))))
+    if col_widths is None:
+        table.auto_set_column_width(col=list(range(len(columns))))
 
 
 def render_report(data: pd.DataFrame, status: dict[str, Any], output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     plt.rcParams["font.family"] = "DejaVu Sans"
-    figure = plt.figure(figsize=(16, 22), dpi=120, facecolor=BG)
-    grid = figure.add_gridspec(4, 2, height_ratios=[0.9, 3.2, 4.8, 3.4], hspace=0.26, wspace=0.16)
+    figure = plt.figure(figsize=(18, 34), dpi=120, facecolor=BG)
+    grid = figure.add_gridspec(6, 2, height_ratios=[0.7, 2.2, 3.0, 4.4, 4.2, 5.0], hspace=0.28, wspace=0.14)
 
     header = figure.add_subplot(grid[0, :])
     header.set_facecolor(BG)
     header.axis("off")
     change_color = LIGHT_GREEN if status["change_pct"] >= 0 else LIGHT_RED
-    header.text(0.0, 0.72, f"{status['symbol']} — Teknik Durum Raporu", color=WHITE, fontsize=26, fontweight="bold")
-    header.text(0.0, 0.30, f"Fiyat: {fmt(status['price'])}", color=WHITE, fontsize=20, fontweight="bold")
-    header.text(0.25, 0.30, f"Değişim: {status['change_pct']:+.2f}%", color=change_color, fontsize=18, fontweight="bold")
-    header.text(0.55, 0.30, f"Bar: {status['timestamp']} | {status['interval']}", color=MUTED, fontsize=12)
-    header.text(0.55, 0.08, f"Kaynak: {status['data_provider']}", color=MUTED, fontsize=10)
-    header.text(0.0, 0.02, "Bilgilendirme amaçlıdır; yatırım tavsiyesi değildir.", color="#94a3b8", fontsize=10)
+    header.text(0.0, 0.72, f"{status['symbol']} — Technical Market State", color=WHITE, fontsize=27, fontweight="bold")
+    header.text(0.0, 0.25, f"Fiyat: {fmt(status['price'])}", color=WHITE, fontsize=20, fontweight="bold")
+    header.text(0.20, 0.25, f"Değişim: {status['change_pct']:+.2f}%", color=change_color, fontsize=18, fontweight="bold")
+    header.text(0.46, 0.30, f"Bar: {status['timestamp']} | {status['interval']}", color=MUTED, fontsize=11)
+    header.text(0.46, 0.08, f"Kaynak: {status['data_provider']}", color=MUTED, fontsize=10)
+    header.text(0.0, -0.02, "Durum raporudur; otomatik AL/SAT puanı değildir. Yatırım tavsiyesi değildir.", color="#94a3b8", fontsize=10)
 
-    chart = figure.add_subplot(grid[1, :])
+    executive_ax = figure.add_subplot(grid[1, :])
+    executive_rows = [[item[0], item[1], item[2]] for item in status["executive"]]
+    executive_colors = [[HEADER, item[3], PANEL] for item in status["executive"]]
+    draw_table(executive_ax, "Piyasa Durum Haritası", ["Aile", "Durum", "Bağlam"], executive_rows, executive_colors, font_size=11, col_widths=[0.16, 0.38, 0.46])
+
+    chart = figure.add_subplot(grid[2, :])
     chart.set_facecolor(PANEL)
     recent = data.tail(120)
     chart.plot(recent.index, recent["Close"], color=WHITE, linewidth=2.0, label="Kapanış")
@@ -491,48 +547,64 @@ def render_report(data: pd.DataFrame, status: dict[str, Any], output: Path) -> N
     chart.plot(recent.index, recent["EMA_50"], color="#f59e0b", linewidth=1.3, label="EMA50")
     chart.plot(recent.index, recent["EMA_200"], color="#f43f5e", linewidth=1.3, label="EMA200")
     chart.fill_between(recent.index, recent["BB_LOWER"], recent["BB_UPPER"], color="#3b82f6", alpha=0.10, label="Bollinger")
+    profile = status["market_context"]["profile"]
+    for label, level, color in [("VAH", profile["vah"], "#22c55e"), ("POC", profile["poc"], "#f59e0b"), ("VAL", profile["val"], "#ef4444")]:
+        chart.axhline(level, color=color, linewidth=1.0, linestyle="--", alpha=0.8, label=label)
     chart.grid(color="#334155", alpha=0.45)
     chart.tick_params(colors=MUTED)
     chart.spines[:].set_color("#334155")
     chart.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m.%y"))
-    chart.legend(facecolor=HEADER, labelcolor=WHITE, loc="upper left", ncol=5)
-    chart.set_title("Fiyat ve Seçili Ortalamalar — Son 120 Bar", color=WHITE, fontsize=15, fontweight="bold", loc="left")
+    chart.legend(facecolor=HEADER, labelcolor=WHITE, loc="upper left", ncol=8)
+    chart.set_title("Fiyat • Ortalamalar • Bollinger • Yaklaşık Hacim Profili — Son 120 Bar", color=WHITE, fontsize=15, fontweight="bold", loc="left")
 
-    ma_ax = figure.add_subplot(grid[2, 0])
-    ma_rows = []
-    ma_colors = []
-    for item in status["ma"]:
-        ma_rows.append([str(item["period"]), fmt(item["sma"]), fmt(item["ema"])])
-        ma_colors.append([HEADER, item["sma_color"], item["ema_color"]])
-    draw_table(ma_ax, "SMA / EMA Değerleri", ["Periyot", "SMA", "EMA"], ma_rows, ma_colors, font_size=11)
-    ma_ax.text(0, -0.035, f"Yeşil: fiyat üstünde | Sarı: ±%{status['equality_tolerance_pct']:.2f} yakın | Kırmızı: fiyat altında", transform=ma_ax.transAxes, color=MUTED, fontsize=9)
+    ma_ax = figure.add_subplot(grid[3, 0])
+    ma_rows = [[str(item["period"]), fmt(item["sma"]), fmt(item["ema"])] for item in status["ma"]]
+    ma_colors = [[HEADER, item["sma_color"], item["ema_color"]] for item in status["ma"]]
+    draw_table(ma_ax, "SMA / EMA Değerleri", ["Periyot", "SMA", "EMA"], ma_rows, ma_colors, font_size=10, col_widths=[0.20, 0.40, 0.40])
+    ma_ax.text(0, -0.035, f"Yeşil: fiyat üstünde | Sarı: ±%{status['equality_tolerance_pct']:.2f} yakın | Kırmızı: fiyat altında", transform=ma_ax.transAxes, color=MUTED, fontsize=8)
 
-    momentum_ax = figure.add_subplot(grid[2, 1])
+    momentum_ax = figure.add_subplot(grid[3, 1])
     momentum_rows = [[item[0], item[1], item[2]] for item in status["momentum"]]
     momentum_colors = [[HEADER, PANEL, item[3]] for item in status["momentum"]]
-    draw_table(momentum_ax, "Momentum", ["Gösterge", "Değerler", "Durum"], momentum_rows, momentum_colors, font_size=9)
+    draw_table(momentum_ax, "Momentum • Kesişim • Eğim", ["Gösterge", "Değerler", "Durum"], momentum_rows, momentum_colors, font_size=7, col_widths=[0.12, 0.38, 0.50])
 
-    trend_ax = figure.add_subplot(grid[3, :])
+    trend_ax = figure.add_subplot(grid[4, 0])
     trend_rows = [[item[0], item[1], item[2]] for item in status["trend_volatility_volume"]]
     trend_colors = [[HEADER, PANEL, item[3]] for item in status["trend_volatility_volume"]]
-    draw_table(trend_ax, "Trend • Konum • Volatilite • Hacim", ["Gösterge", "Değerler", "Durum"], trend_rows, trend_colors, font_size=9)
+    draw_table(trend_ax, "Trend • Volatilite • Hacim", ["Gösterge", "Değerler", "Durum"], trend_rows, trend_colors, font_size=7, col_widths=[0.14, 0.31, 0.55])
+
+    location_ax = figure.add_subplot(grid[4, 1])
+    location_rows = [[item[0], item[1], item[2]] for item in status["location"]]
+    location_colors = [[HEADER, PANEL, item[3]] for item in status["location"]]
+    draw_table(location_ax, "Konum • AVWAP • POC/VA • Yapı Seviyeleri", ["Alan", "Değerler", "Durum"], location_rows, location_colors, font_size=7, col_widths=[0.14, 0.52, 0.34])
+
+    participation_ax = figure.add_subplot(grid[5, 0])
+    participation_rows = [[item[0], item[1], item[2]] for item in status["participation"]]
+    participation_colors = [[HEADER, PANEL, item[3]] for item in status["participation"]]
+    draw_table(participation_ax, "Katılım • RVOL • Delta/CVD Tahmini", ["Alan", "Değerler", "Durum"], participation_rows, participation_colors, font_size=7, col_widths=[0.14, 0.34, 0.52])
+
+    events_ax = figure.add_subplot(grid[5, 1])
+    event_rows = [[item[0], item[1], item[2]] for item in status["events"]]
+    event_colors = [[item[3], PANEL, HEADER] for item in status["events"]]
+    draw_table(events_ax, "Son 12 Teyitli Olay", ["Olay", "Zaman", "Tür"], event_rows, event_colors, font_size=7, col_widths=[0.50, 0.24, 0.26])
 
     figure.savefig(output, facecolor=figure.get_facecolor(), bbox_inches="tight")
     plt.close(figure)
 
 
 def telegram_caption(status: dict[str, Any]) -> str:
-    macd = status["momentum"][0][2]
-    rsi_status = status["momentum"][1][2]
-    adx_status = status["trend_volatility_volume"][0][2]
+    context = status["market_context"]
     return (
-        f"📊 {status['symbol']} Teknik Durum\n"
+        f"📊 {status['symbol']} Teknik Piyasa Durumu\n"
         f"Fiyat: {fmt(status['price'])} ({status['change_pct']:+.2f}%)\n"
-        f"MACD: {macd}\n"
-        f"RSI: {rsi_status}\n"
-        f"DMI: {adx_status}\n"
+        f"Rejim: {context['regime']['state']}\n"
+        f"Yapı: {context['structure']['state']} — {context['structure']['event']}\n"
+        f"Konum: {context['profile']['position']}\n"
+        f"POC: {fmt(context['profile']['poc'])} | VAH: {fmt(context['profile']['vah'])} | VAL: {fmt(context['profile']['val'])}\n"
+        f"RVOL: {context['relative_volume']:.2f}x\n"
+        f"Kaynak: {status['data_provider']}\n"
         f"Bar: {status['timestamp']}\n\n"
-        "Bilgilendirme amaçlıdır; yatırım tavsiyesi değildir."
+        "Durum raporudur; otomatik AL/SAT puanı değildir. Yatırım tavsiyesi değildir."
     )
 
 
@@ -558,6 +630,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ticker", required=True, help="Örnek: THYAO veya AAPL")
     parser.add_argument("--market", default="BIST", choices=["BIST", "US", "AUTO"])
     parser.add_argument("--provider", default="AUTO", choices=["AUTO", "BORSAPY", "YFINANCE"])
+    parser.add_argument("--anchor-date", default="", help="Manuel AVWAP başlangıcı, ör. 2026-01-02")
     parser.add_argument("--period", default="2y")
     parser.add_argument("--interval", default="1d")
     parser.add_argument("--output", default="reports/technical_report.png")
@@ -568,7 +641,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    config = ScanConfig(args.ticker, args.market, args.period, args.interval, provider=args.provider)
+    config = ScanConfig(
+        ticker=args.ticker,
+        market=args.market,
+        period=args.period,
+        interval=args.interval,
+        provider=args.provider,
+        anchor_date=args.anchor_date,
+    )
     symbol, prices = download_prices(config)
     calculated = calculate_indicators(prices)
     status = build_status(calculated, config, symbol)
