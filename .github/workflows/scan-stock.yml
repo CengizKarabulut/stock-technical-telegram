@@ -14,6 +14,12 @@ on:
         default: "BIST"
         type: choice
         options: [BIST, US, AUTO]
+      provider:
+        description: "Veri kaynağı (AUTO: BIST için TradingView, hatada yfinance)"
+        required: true
+        default: "AUTO"
+        type: choice
+        options: [AUTO, BORSAPY, YFINANCE]
       period:
         description: "Veri dönemi"
         required: true
@@ -63,21 +69,24 @@ jobs:
         env:
           INPUT_TICKER: ${{ inputs.ticker }}
           INPUT_MARKET: ${{ inputs.market }}
+          INPUT_PROVIDER: ${{ inputs.provider }}
           INPUT_PERIOD: ${{ inputs.period }}
           INPUT_INTERVAL: ${{ inputs.interval }}
         run: |
           python -m src.stock_dashboard \
             --ticker "$INPUT_TICKER" \
             --market "$INPUT_MARKET" \
+            --provider "$INPUT_PROVIDER" \
             --period "$INPUT_PERIOD" \
             --interval "$INPUT_INTERVAL"
 
-      - name: Telegram grubundaki konuya gönder
+      - name: Telegram grubunun Genel konusuna gönder
         if: ${{ inputs.send_telegram }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: "-1003502567927"
-          TELEGRAM_MESSAGE_THREAD_ID: "1"
+          # Boş bırakıldığında Telegram grubunun Genel konusuna gönderilir.
+          TELEGRAM_MESSAGE_THREAD_ID: ""
         run: python -m src.send_telegram
 
       - name: Raporu Actions artifact olarak sakla
@@ -88,8 +97,3 @@ jobs:
           path: reports/
           if-no-files-found: warn
           retention-days: 14
-
-
-
-
-

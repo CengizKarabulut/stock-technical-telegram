@@ -3,7 +3,14 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from src.stock_dashboard import MA_PERIODS, ScanConfig, build_status, calculate_indicators, normalize_symbol
+from src.stock_dashboard import (
+    MA_PERIODS,
+    ScanConfig,
+    build_status,
+    calculate_indicators,
+    normalize_symbol,
+    validate_price_data,
+)
 
 
 def synthetic_prices(rows: int = 500) -> pd.DataFrame:
@@ -28,6 +35,12 @@ class IndicatorTests(unittest.TestCase):
         self.assertEqual(normalize_symbol("thyao", "BIST"), "THYAO.IS")
         self.assertEqual(normalize_symbol("THYAO.IS", "BIST"), "THYAO.IS")
         self.assertEqual(normalize_symbol("aapl", "US"), "AAPL")
+
+    def test_price_validation_preserves_provider(self) -> None:
+        data = validate_price_data(synthetic_prices(), "TEST", "borsapy/TradingView")
+        self.assertEqual(data.attrs["provider"], "borsapy/TradingView")
+        with self.assertRaisesRegex(RuntimeError, "en az 382 bar"):
+            validate_price_data(synthetic_prices(100), "TEST", "test")
 
     def test_all_ma_periods_are_calculated(self) -> None:
         result = calculate_indicators(synthetic_prices())

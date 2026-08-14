@@ -9,7 +9,7 @@ import requests
 
 
 DEFAULT_CHAT_ID = "-1003502567927"
-DEFAULT_THREAD_ID = "1"
+DEFAULT_THREAD_ID = ""
 
 
 def caption(status: dict) -> str:
@@ -22,7 +22,8 @@ def caption(status: dict) -> str:
         f"MACD: {macd}\n"
         f"RSI: {rsi}\n"
         f"DMI: {dmi}\n"
-        f"Bar: {status['timestamp']}\n\n"
+        f"Bar: {status['timestamp']}\n"
+        f"Kaynak: {status.get('data_provider', 'bilinmiyor')}\n\n"
         "Bilgilendirme amaçlıdır; yatırım tavsiyesi değildir."
     )
 
@@ -46,7 +47,8 @@ def send(image_path: Path, json_path: Path) -> None:
         )
     if not response.ok:
         raise RuntimeError(f"Telegram gönderimi başarısız: HTTP {response.status_code} — {response.text[:300]}")
-    print(f"Telegram raporu gönderildi: chat_id={chat_id}, message_thread_id={thread_id}")
+    destination = f"konu {thread_id}" if thread_id else "Genel konu"
+    print(f"Telegram raporu gönderildi: chat_id={chat_id}, hedef={destination}")
 
 
 def main() -> None:
@@ -59,4 +61,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

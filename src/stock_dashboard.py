@@ -43,6 +43,7 @@ class ScanConfig:
     period: str = "2y"
     interval: str = "1d"
     equality_tolerance_pct: float = 0.02
+    provider: str = "AUTO"
 
 
 def normalize_symbol(ticker: str, market: str) -> str:
@@ -55,7 +56,27 @@ def normalize_symbol(ticker: str, market: str) -> str:
     return symbol
 
 
-def download_prices(config: ScanConfig) -> tuple[str, pd.DataFrame]:
+def validate_price_data(data: pd.DataFrame, symbol: str, provider: str) -> pd.DataFrame:
+    if data.empty:
+        raise RuntimeError(f"{symbol} için {provider} fiyat verisi bulunamadı.")
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    missing = [column for column in required if column not in data.columns]
+    if missing:
+        raise RuntimeError(f"{provider} verisinde eksik fiyat sütunları: {', '.join(missing)}")
+    data = data[required].dropna(subset=["Open", "High", "Low", "Close"]).copy()
+    data["Volume"] = data["Volume"].fillna(0.0)
+    if len(data) < max(MA_PERIODS) + 5:
+        raise RuntimeError(
+            f"{symbol} için en az {max(MA_PERIODS) + 5} bar gerekli; yalnızca {len(data)} bar geldi. "
+            "Daha uzun bir period seçin."
+        )
+    data.attrs["provider"] = provider
+    return data
+
+
+def download_yfinance(config: ScanConfig) -> tuple[str, pd.DataFrame]:
     symbol = normalize_symbol(config.ticker, config.market)
     data = yf.download(
         symbol,
@@ -65,22 +86,36 @@ def download_prices(config: ScanConfig) -> tuple[str, pd.DataFrame]:
         progress=False,
         threads=False,
     )
-    if data.empty:
-        raise RuntimeError(f"{symbol} için fiyat verisi bulunamadı.")
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-    required = ["Open", "High", "Low", "Close", "Volume"]
-    missing = [column for column in required if column not in data.columns]
-    if missing:
-        raise RuntimeError(f"Eksik fiyat sütunları: {', '.join(missing)}")
-    data = data[required].dropna(subset=["Open", "High", "Low", "Close"]).copy()
-    data["Volume"] = data["Volume"].fillna(0.0)
-    if len(data) < max(MA_PERIODS) + 5:
-        raise RuntimeError(
-            f"{symbol} için en az {max(MA_PERIODS) + 5} bar gerekli; yalnızca {len(data)} bar geldi. "
-            "Daha uzun bir period seçin."
-        )
-    return symbol, data
+    return symbol, validate_price_data(data, symbol, "yfinance")
+
+
+def download_borsapy(config: ScanConfig) -> tuple[str, pd.DataFrame]:
+    if config.market.upper() != "BIST":
+        raise ValueError("borsapy sağlayıcısı bu raporda yalnızca BIST hisseleri için kullanılabilir.")
+    try:
+        import borsapy as bp
+    except ImportError as exc:
+        raise RuntimeError("borsapy kurulu değil; requirements.txt bağımlılıklarını yükleyin.") from exc
+    symbol = config.ticker.strip().upper().removesuffix(".IS").removesuffix(".E")
+    if not symbol:
+        raise ValueError("Hisse sembolü boş olamaz.")
+    data = bp.Ticker(symbol).history(period=config.period, interval=config.interval)
+    return symbol, validate_price_data(data, symbol, "borsapy/TradingView")
+
+
+def download_prices(config: ScanConfig) -> tuple[str, pd.DataFrame]:
+    provider = config.provider.strip().upper()
+    if provider not in {"AUTO", "BORSAPY", "YFINANCE"}:
+        raise ValueError(f"Geçersiz veri sağlayıcısı: {config.provider}")
+    if provider == "BORSAPY":
+        return download_borsapy(config)
+    if provider == "YFINANCE" or config.market.upper() != "BIST":
+        return download_yfinance(config)
+    try:
+        return download_borsapy(config)
+    except Exception as exc:
+        print(f"Uyarı: borsapy/TradingView başarısız oldu ({exc}); yfinance yedeği deneniyor.")
+        return download_yfinance(config)
 
 
 def ema(series: pd.Series, length: int) -> pd.Series:
@@ -393,6 +428,7 @@ def build_status(data: pd.DataFrame, config: ScanConfig, symbol: str) -> dict[st
     ]
 
     return {
+        "data_provider": data.attrs.get("provider", config.provider),
         "symbol": symbol,
         "requested_ticker": config.ticker,
         "timestamp": data.index[-1].isoformat(),
@@ -444,6 +480,7 @@ def render_report(data: pd.DataFrame, status: dict[str, Any], output: Path) -> N
     header.text(0.0, 0.30, f"Fiyat: {fmt(status['price'])}", color=WHITE, fontsize=20, fontweight="bold")
     header.text(0.25, 0.30, f"Değişim: {status['change_pct']:+.2f}%", color=change_color, fontsize=18, fontweight="bold")
     header.text(0.55, 0.30, f"Bar: {status['timestamp']} | {status['interval']}", color=MUTED, fontsize=12)
+    header.text(0.55, 0.08, f"Kaynak: {status['data_provider']}", color=MUTED, fontsize=10)
     header.text(0.0, 0.02, "Bilgilendirme amaçlıdır; yatırım tavsiyesi değildir.", color="#94a3b8", fontsize=10)
 
     chart = figure.add_subplot(grid[1, :])
@@ -520,6 +557,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Hisse teknik durum görseli üretir ve isteğe bağlı Telegram'a gönderir.")
     parser.add_argument("--ticker", required=True, help="Örnek: THYAO veya AAPL")
     parser.add_argument("--market", default="BIST", choices=["BIST", "US", "AUTO"])
+    parser.add_argument("--provider", default="AUTO", choices=["AUTO", "BORSAPY", "YFINANCE"])
     parser.add_argument("--period", default="2y")
     parser.add_argument("--interval", default="1d")
     parser.add_argument("--output", default="reports/technical_report.png")
@@ -530,7 +568,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    config = ScanConfig(args.ticker, args.market, args.period, args.interval)
+    config = ScanConfig(args.ticker, args.market, args.period, args.interval, provider=args.provider)
     symbol, prices = download_prices(config)
     calculated = calculate_indicators(prices)
     status = build_status(calculated, config, symbol)

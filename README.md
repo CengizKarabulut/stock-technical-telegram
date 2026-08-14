@@ -1,15 +1,16 @@
 # Stock Technical Telegram
 
-GitHub Actions ekranından bir hisse sembolü girerek görsel teknik durum raporu üretir. PNG ve JSON raporları Actions artifact olarak saklanır; PNG ayrıca Telegram grubundaki belirlenmiş konu başlığına gönderilebilir.
+GitHub Actions ekranından bir hisse sembolü girerek görsel teknik durum raporu üretir. PNG ve JSON raporları Actions artifact olarak saklanır; PNG ayrıca Telegram grubunun Genel konusuna gönderilebilir.
 
 Proje otomatik AL/SAT kararı üretmez. Teknik değerleri ve mevcut durumları raporlar.
 
 ## Telegram hedefi
 
 - Grup kimliği: `-1003502567927`
-- Konu başlığı: `message_thread_id=1` (General)
+- Konu: Genel
+- Genel konuya gönderimde `message_thread_id` özellikle boş bırakılır.
 
-Botun gruba eklenmiş ve fotoğraf gönderme yetkisine sahip olması gerekir.
+Botun gruba eklenmiş ve fotoğraf gönderme yetkisine sahip olması gerekir. Telegram bağlantısındaki `_1` değeri Bot API konu kimliği değildir; `message_thread_id=1` gönderimi `message thread not found` hatasına yol açar.
 
 ## İlk kurulum
 
@@ -24,9 +25,16 @@ Token'ı hiçbir dosyaya, issue'ya veya Actions loguna yazmayın.
 
 1. **Actions → Hisse Teknik Tarama → Run workflow** yolunu açın.
 2. `ticker` alanına `THYAO`, `ASELS`, `TUPRS` veya `AAPL` gibi sembolü girin.
-3. BIST sembolleri için `market=BIST` seçin; `.IS` otomatik eklenir.
-4. SMA/EMA 377 için günlük grafikte en az `period=2y` kullanın.
-5. `send_telegram=true` olduğunda rapor hedef Telegram konusuna gönderilir.
+3. BIST sembolleri için `market=BIST` seçin; sağlayıcıya uygun sembol biçimi otomatik uygulanır.
+4. `provider=AUTO` önerilir. BIST'te önce borsapy/TradingView, hata olursa yfinance; diğer piyasalarda yfinance kullanılır.
+5. SMA/EMA 377 için günlük grafikte en az `period=2y` kullanın.
+6. `send_telegram=true` olduğunda rapor hedef Telegram grubunun Genel konusuna gönderilir.
+
+Sağlayıcı seçenekleri:
+
+- `AUTO`: BIST için borsapy/TradingView; bağlantı veya servis hatasında yfinance yedeği.
+- `BORSAPY`: Yalnızca BIST için TradingView WebSocket verisini zorunlu kullanır; hata halinde işlem başarısız olur.
+- `YFINANCE`: Eski yfinance kaynağını zorunlu kullanır.
 
 ## SMA ve EMA tablosu
 
@@ -55,7 +63,7 @@ Periyotlar:
 ```bash
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python -m src.stock_dashboard --ticker THYAO --market BIST --period 2y --interval 1d
+python -m src.stock_dashboard --ticker THYAO --market BIST --provider AUTO --period 2y --interval 1d
 ```
 
 Telegram gönderimi:
@@ -64,9 +72,10 @@ Telegram gönderimi:
 python -m src.send_telegram
 ```
 
-Gerekli ortam değişkeni `TELEGRAM_BOT_TOKEN`'dır. Grup ve konu kimlikleri workflow içinde hedef gruba göre ayarlanmıştır.
+Gerekli ortam değişkeni `TELEGRAM_BOT_TOKEN`'dır. `TELEGRAM_CHAT_ID` varsayılan olarak hedef gruba ayarlıdır. `TELEGRAM_MESSAGE_THREAD_ID` boş olduğunda Genel konu kullanılır; başka bir forum konusu için Bot API'den alınan gerçek konu kimliği verilebilir.
 
 ## Veri ve sorumluluk reddi
 
-Fiyat/hacim verisi `yfinance` üzerinden alınır. Veriler gecikmeli veya eksik olabilir. Rapor yalnızca bilgilendirme ve teknik inceleme amaçlıdır; yatırım tavsiyesi değildir.
+BIST fiyat/hacim verisi varsayılan olarak [borsapy](https://github.com/saidsurucu/borsapy) aracılığıyla TradingView WebSocket kaynağından alınır. Kimlik doğrulamasız TradingView verisi yaklaşık 15 dakika gecikmelidir. AUTO modunda borsapy/TradingView başarısız olursa yfinance kullanılır. Raporun JSON çıktısındaki `data_provider` alanı o çalışmada fiilen kullanılan kaynağı gösterir.
 
+borsapy yalnızca kişisel ve eğitim amaçlı kullanım için sunulmaktadır; ticari kullanımda ilgili piyasa veri lisansları gerekir. Veriler gecikmeli veya eksik olabilir. Rapor yalnızca bilgilendirme ve teknik inceleme amaçlıdır; yatırım tavsiyesi değildir.
